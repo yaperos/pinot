@@ -1,67 +1,103 @@
-#
-# Licensed to the Apache Software Foundation (ASF) under one
-# or more contributor license agreements.  See the NOTICE file
-# distributed with this work for additional information
-# regarding copyright ownership.  The ASF licenses this file
-# to you under the Apache License, Version 2.0 (the
-# "License"); you may not use this file except in compliance
-# with the License.  You may obtain a copy of the License at
-#
-#   http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing,
-# software distributed under the License is distributed on an
-# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-# KIND, either express or implied.  See the License for the
-# specific language governing permissions and limitations
-# under the License.
-#
-name: Pinot Docker Image Build and Publish
+name: Pinot Docker Image Build and Publish (by Yape)
 
 on:
   workflow_dispatch:
     inputs:
+      environment:
+        required: true
+        type: choice
+        options:
+          - qa
+          - stg
+          - prd
       gitUrl:
-        description: "The Pinot git repo to check out to build, use https."
-        default: "https://github.com/apache/pinot.git"
+        default: "https://github.com/yaperos/pinot.git"
         required: true
       commit:
-        description: "The branch/commit to check out to build Pinot image."
         default: "master"
         required: true
       platform:
-        description: "The platform of the image to build, e.g. linux/amd64,linux/arm64"
         default: "linux/amd64"
         required: true
       dockerImageName:
-        description: "The docker image name, default to 'apachepinot/pinot'."
-        default: "apachepinot/pinot"
+        default: "yaperos/pinot"
         required: true
       tags:
-        description: "Tags to push of the image, comma separated, e.g. tag1,tag2,tag3"
         default: ""
+        required: true
+      unit:
+        type: string
+        default: "yape3"
+      domain:
+        type: string
+        default: "yape"
 
 jobs:
-  build-pinot-docker-image:
-    name: Build Pinot Docker Image
+  build:
+    environment:
+      name: ${{ inputs.environment }}
     runs-on: ubuntu-latest
     steps:
-    - name: Login to DockerHub
-      uses: docker/login-action@v3
-      with:
-        username: ${{ secrets.DOCKERHUB_USERNAME }}
-        password: ${{ secrets.DOCKERHUB_TOKEN }}
-    - uses: docker/setup-qemu-action@v3
-      name: Set up QEMU
-    - uses: docker/setup-buildx-action@v3
-      name: Set up Docker Buildx
-    - uses: actions/checkout@v4
-    - name: Build and push the Docker image
-      env:
-        DOCKER_FILE_BASE_DIR: "docker/images/pinot"
-        DOCKER_IMAGE_NAME: ${{ github.event.inputs.dockerImageName }}
-        BUILD_PLATFORM: ${{ github.event.inputs.platform }}
-        PINOT_GIT_URL: ${{ github.event.inputs.gitUrl }}
-        PINOT_BRANCH: ${{ github.event.inputs.commit }}
-        TAGS: ${{ github.event.inputs.tags }}
-      run: .github/workflows/scripts/docker/.pinot_docker_image_build_and_push.sh
+      - name: ⬇️ Download Scripts
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: yaperos/reusable-workflows
+          token: ${{ secrets.GH_PAT }}
+          path: "./scripts_workflow"
+          ref: main
+      - name: Setup VPN Script
+        run: |
+          cp ./scripts_workflow/.github/scripts/vpn_connect.sh /tmp/vpn_connect.sh; chmod +x /tmp/vpn_connect.sh
+          cp ./scripts_workflow/.github/vpn/tools_techtools@yape.com.pe_AccessTools_linux.ovpn /tmp/vpn.ovpn
+      - name: Validating ReRun integration
+        if: ${{ inputs.environment == 'prd' }}
+        run: |
+          python -m pip install actions-toolkit --quiet
+          python ./scripts_workflow/.github/scripts/check_rerun.py -g ${{ secrets.GH_PAT }} -r ${{ github.run_attempt }} -a ${{ github.triggering_actor }}
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - name: Set Global Environment Name
+        run: |
+          echo "GLOBAL_ENVIRONMENT_NAME=" >> $GITHUB_ENV
+          if [ "${{ inputs.unit }}" = "yape3" ]; then
+            echo "GLOBAL_ENVIRONMENT_NAME=$(echo ${{ inputs.environment }} | tr '[:lower:]' '[:upper:]')" >> $GITHUB_ENV
+          elif [ "${{ inputs.unit }}" = "yape3mp" ]; then
+            echo "GLOBAL_ENVIRONMENT_NAME=$(echo ${{ inputs.environment }}_${{ inputs.unit }} | tr '[:lower:]' '[:upper:]')" >> $GITHUB_ENV
+          fi
+      - name: Connect VPN
+        timeout-minutes: 5
+        env:
+          VPN_CA_CRT: ${{ secrets[format('VPN_CA_CRT_{0}', env.GLOBAL_ENVIRONMENT_NAME )] }}
+          VPN_USER_CRT: ${{ secrets[format('VPN_USER_CRT_{0}', env.GLOBAL_ENVIRONMENT_NAME )] }}
+          VPN_USER_KEY: ${{ secrets[format('VPN_USER_KEY_{0}', env.GLOBAL_ENVIRONMENT_NAME )] }}
+          VPN_SECRET_USERNAME_PASSWORD: ${{ secrets[format('VPN_SECRET_USERNAME_PASSWORD_{0}', env.GLOBAL_ENVIRONMENT_NAME )] }}
+          VPN_TLS_KEY: ${{ secrets[format('VPN_TLS_KEY_{0}', env.GLOBAL_ENVIRONMENT_NAME )] }}
+          VPN_HOST_IP: ${{ secrets[format('VPN_HOST_IP_{0}', env.GLOBAL_ENVIRONMENT_NAME )] }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_REF: ${{ github.ref }}
+        run: |
+          sed -i "s/{{YAPE_VPN_RESOLVECTL}}/${{ vars[format('YAPE_VPN_RESOLVECTL_{0}', env.GLOBAL_ENVIRONMENT_NAME)] }}/g" /tmp/vpn_connect.sh
+          /tmp/vpn_connect.sh
+      - name: Container Registry Login #####
+        if: ${{ inputs.unit == 'yape3' || inputs.unit == 'yape3mp' }}
+        uses: azure/docker-login@15c4aadf093404726ab2ff205b2cdd33fa6d054c # v2.0
+        with:
+          login-server: acr${{ inputs.unit }}eastus${{ inputs.environment }}.azurecr.io
+          username: ${{ secrets[format('AZURE_ACR_USERNAME_{0}', env.GLOBAL_ENVIRONMENT_NAME )] }}
+          password: ${{ secrets[format('AZURE_ACR_PASSWORD_{0}', env.GLOBAL_ENVIRONMENT_NAME )] }}
+      - uses: docker/setup-qemu-action@v3
+        name: Set up QEMU
+      - uses: docker/setup-buildx-action@v3
+        name: Set up Docker Buildx
+      - uses: actions/checkout@v4
+      - name: Build and push the Docker image
+        env:
+          DOCKER_FILE_BASE_DIR: "docker/images/pinot"
+          DOCKER_IMAGE_NAME: ${{ github.event.inputs.dockerImageName }}
+          BUILD_PLATFORM: ${{ github.event.inputs.platform }}
+          PINOT_GIT_URL: ${{ github.event.inputs.gitUrl }}
+          PINOT_BRANCH: ${{ github.event.inputs.commit }}
+          TAGS: ${{ github.event.inputs.tags }}
+        run: .github/workflows/scripts/docker/.pinot_docker_image_build_and_push.sh
